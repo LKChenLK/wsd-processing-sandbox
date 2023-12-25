@@ -1,0 +1,37 @@
+
+
+
+MAKING THE PREPROCESSInG SCRIPTS:
+
+- construct input data from data/examples/semcor_train_token_cls.csv
+=> find a way to get word net definitions / senses from the gold keys
+
+- also construct one from nltk.wordnet from scratch? Like do it with just the sentences and get all the senses of each word.
+=> this should not take too much time!!!
+
+
+MAKING THE TEST SCRIPTS FOR SEMCOR:
+- find existing first!!
+
+=========================
+
+所以是要：
+- 評估在 cambridge 上面的程式碼
+- 處理 semcor 的程式＋資料 (整理成模型可以直接吃的格式（the t5 version)
+- 近年 wsd 方法的報告
+
+
+=========================
+Download preprocessed dataset
+-> make empy folders:
+Data
+	examples
+	gold_keys
+
+-> go into the preprocessed dataset folder
+-> go into Training_Corpora/SemCor
+-> move ....train_token_cls.csv into data/examples
+   move ....semcor.gold.key.txt into data/gold_keys
+-> go into ../../Evaluation_Datasets
+   For each folder, move *.text_token_cls.csv into data/examples ; *.gold.key.txt into data/gold_keys
+   
