@@ -1,0 +1,9 @@
+*.csv
+*.jsonl
+*.txt
+*.xml
+*.sense
+*.gloss
+.DS_Store
+
+.venv/
