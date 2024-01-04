@@ -1,22 +1,37 @@
 # import nltk
 # nltk.download('semcor')
 # nltk.download('wordnet')
+import os
+import csv
+import argparse
 from nltk.corpus import semcor
 from nltk.corpus import wordnet as wn
 from tqdm import tqdm
 from typing import List, Dict
 
 import jsonlines
-import spacy
+# import spacy
 
-model_en = spacy.load('en_core_web_sm', disable=['parser', 'ner', 'textcat', 'custom'])
+# model_en = spacy.load('en_core_web_sm', disable=['parser', 'ner', 'textcat', 'custom'])
 
 INPUT_TEMPLATE = """\
 question: which description describes the word " {0} " best in the \
 following context? descriptions:[  " {1} ",  or " {2} " ] context: {3}\
 """
 
-def format_prompt_input(word: str, sent: str, definitions: List) -> Dict:
+def mark_target(target_word: str, sent: List, target_idx_start: int, target_idx_end: int) -> str:
+    out_sent = [tok for tok in sent]
+    out_sent[target_idx_start:target_idx_end] = [f'" {target_word} "']
+    out_sent = " ".join(out_sent)
+    return out_sent
+
+def format_prompt_input(
+        target_word: str, 
+        target_idx_start: int, 
+        target_idx_end: int, 
+        sent: List, 
+        definitions: List
+        ) -> Dict:
     """Turns token and its dictionary definitions + token's context sentence
     into input prompt for WSD model.
     :param word: word to be disambiguated
@@ -24,36 +39,16 @@ def format_prompt_input(word: str, sent: str, definitions: List) -> Dict:
     :param definitions: List[Dict]. Output of `get_cambridge_dict_info()`
     :return: Dict[str]
     """
-    def mark_target(sent: str, target: str) -> str:
-        sent = model_en(sent)
-        sent_info = {
-                word.lemma_: {"idx": word.i, "text": word.text,}
-                    for word in sent
-                }
-        try:
-            lemma = target.lower()
-            target_idx = sent_info[lemma]["idx"] # target.lower() should be the lemma
-            target_orig_form = sent_info[lemma]['text']
-            out_sent = [tok.text for tok in sent]
-            out_sent[target_idx] = f'" {target_orig_form} "'
-            out_sent = " ".join(out_sent)
-            return out_sent
-        except KeyError as ke:
-            return None
-        except IndexError as ie:
-            print(f"Error with word {target}: {ie}")
-            return None
 
     for i, item in enumerate(definitions):
-        # Probably because the model was fine-tuned using definition indices
-        # that start with 1, we number the definitions starting with 1 also.
+        # We number the definitions starting with 1 also.
         item["numbered_def"] = f"({i + 1}) {item['data-en_def']}"
 
-    context_sent = mark_target(sent, word)
+    context_sent = mark_target(target_word, sent, target_idx_start, target_idx_end)
     if context_sent is None:
-        return None
+        raise NotImplementedError
     input_prompt = INPUT_TEMPLATE.format(
-        word,
+        target_word,
         ' " , " '.join([item["numbered_def"] for item in definitions][:-1]),
         [item["numbered_def"] for item in definitions][-1],  # "def1, ..., or def4"
         context_sent,  # context
@@ -66,51 +61,81 @@ def format_prompt_input(word: str, sent: str, definitions: List) -> Dict:
     return {"input": input_prompt, "definitions": definitions}
 
 
+def load_keys(input_file: os.PathLike) -> None:
+    data = []
+    with open(input_file, "r", encoding="'iso-8859-1'") as f:
+        reader = csv.reader(f, delimiter="\t")
+        # Skip the header
+        next(reader)      
+        prev_target_id = None
+        current_sense_idx = -1
+        target_sense_idx = -1 # which sense the target word is in the list of senses
+        senses = []
+        for el in reader:
+            target_id, label, sentence, gloss, target_index_start, target_index_end, sense_key = el
+            target_index_start, target_index_end = int(target_index_start), int(target_index_end)
+            
+            # first line of csv file
+            if not prev_target_id:
+                prev_target_id = el[0]
+                continue
+            
+            if prev_target_id != el[0]:
+                prev_target_id = el[0]
+                sentence = sentence.split()
+                target_word = " ".join(sentence[target_index_start:target_index_end])
+                senses = [{'data-en_def': sense} for sense in senses]
+                prompt = format_prompt_input(target_word, target_index_start, target_index_end, sentence, senses)
+                assert target_sense_idx != -1
+                data.append(
+                    {
+                        "prompt": prompt,
+                        "target_sense_idx": target_sense_idx, # 0-based. this helps us find the sense key of the target word, 
+                        # which helps us find the corresponding definition
+                        "sense_key": sense_key, # ...just in case
+                        "target_id": target_id # this helps us find the gold key in the gold key file
+                    }
+                )
+                senses, target_sense_idx = [], -1
 
-# Use NLTK data directly
-semcor_data = []
-for sent in tqdm(semcor.tagged_sents(tag="both")):
-    sent_str = ' '.join([leaf for tok in sent for leaf in tok.leaves()])
-    for tok in sent:
-        breakpoint()
-        if type(tok.label()) != str and tok.label() is not None:
-            syn = tok.label().synset()
-            pos = tok[0].label()
-            word = ' '.join(tok[0].leaves())
-            target_def = syn.definition()
-            all_defs = [_syn.definition() for _syn in wn.synsets(tok.label().name())]
+            senses.append(gloss)
+            current_sense_idx += 1
+            if label:
+                target_sense_idx = current_sense_idx
+    return data
 
-            # search index of target_def
-            target_sense_num = -1
-            for i, d in enumerate(all_defs):
-                if d == syn.definition():
-                    target_sense_num = i
-                    break
 
-            examples = []
-            if syn.examples():
-                for ex in syn.examples():
-                    if word in ex:
-                        examples.append(ex)
 
-            syn = syn.name()
-            token_info = {
-                'word': word,
-                'synset': syn,
-                'target_def_index': target_def,
-                'pos': pos,
-                'examples': examples,
-                'sent': sent_str
-            }
-            semcor_data.append(token_info)
+def load_gold_keys(gold_key_file: os.PathLike) -> Dict[str, str]:
+    gold_keys = {}
+    with open(gold_key_file, "r", encoding="utf-8") as f:
+        s = f.readline().strip()
+        while s:
+            tmp = s.split()
+            gold_keys[tmp[0]] = tmp[1:]
+            s = f.readline().strip()
+    return gold_keys
+
+def main(args):
+    dataset_name = args.dataset_name
+    data_dir = args.data_dir
+
+    if 'semcor' not in dataset_name: # test data
+        gold_keys = load_gold_keys(os.path.join(data_dir, 'gold_keys', f'{dataset_name}.gold.key.txt'))
+        file_path = os.path.join(data_dir, 'examples', f'{dataset_name}_test_token_cls.csv')
+        data = load_keys(os.path.join(data_dir, 'examples', f'{dataset_name}_test_token_cls.csv'))
+    else: # training data
+        file_path = os.path.join(data_dir, 'examples', f'{dataset_name}_train_token_cls.csv')
+        data = load_keys(os.path.join(data_dir, 'examples', f'{dataset_name}_train_token_cls.csv'))
     
-        #breakpoint()
-            # tok: (Lemma('group.n.01.group') (NE (NNP Fulton County Grand Jury)))
-            # syn: Synset('group.n.01')
-            # pos: NE
+    with jsonlines.open(os.path.join(data_dir, dataset_name+".jsonl"), "w") as f:
+        f.write_all(data)
 
-with jsonlines.open('semcor_data.jsonl', 'w') as f:
-    f.write_all(semcor_data)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_name", type=str, required=True)
+    parser.add_argument("--data_dir", type=str, required=True)
+    args = parser.parse_args()
 
-
+    main(args)
 
